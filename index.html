@@ -222,8 +222,13 @@ async function displayDetections() {
 
             <div>
                 <strong>${species.commonName}</strong><br>
-                ${new Date(detection.timestamp).toLocaleString()}<br>
-                <a href="${detection.soundscape.url}" target="_blank" style="font-size: smaller;">${soundscape_filename}</a>
+                ${new Date(detection.timestamp).toLocaleString()}
+
+                <p style="font-size:smaller;">
+                    <a href="${detection.soundscape.url}" target="_blank">${soundscape_filename}</a><br>
+                    Download and save as .mp3 to upload to iNaturalist
+                </p>
+
                 <p>
                     ${coords.lat}, ${coords.lon}<br>
                     Accuracy: ${gps_accuracy}m
