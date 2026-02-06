@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>BirdWeather Detections Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.Default.css" />
+
+  <script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/leaflet.markercluster.js"></script>
+
+  <!-- jQuery first, then Popper.js, then Bootstrap JS -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.0.0/dist/css/bootstrap.min.css" crossorigin="anonymous">
+
+  <script src="https://code.jquery.com/jquery-3.2.1.slim.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/popper.js@1.12.9/dist/umd/popper.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.0.0/dist/js/bootstrap.min.js" crossorigin="anonymous"></script>
+
+  <style>
+    #map {
+      height: 700px;
+      width: 100%;
+    }
+
+    .rounded-icon {
+      border-radius: 25%; /* or any other value to adjust the roundness */
+      overflow: hidden; /* this will ensure the icon is fully rounded */
+    }
+
+    #instructions-btn {
+        position: absolute;
+        top: 100px;
+        left: 10px;
+        z-index: 500;
+    }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- Simple Loading Modal -->
+<div class="modal fade" id="loadingModal" tabindex="-1" role="dialog" aria-labelledby="loadingModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-sm" role="document">
+        <div class="modal-content">
+            <div class="modal-body">
+                <strong>Loading Detections... This can take a bit if there are a lot of detections</strong>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Button trigger modal -->
+<button id="instructions-btn" type="button" class="btn btn-primary" data-toggle="modal" data-target="#stationIdModal">
+    Set Station ID
+</button>
+
+<!-- Modal -->
+<div class="modal fade" id="stationIdModal" tabindex="-1" role="dialog" aria-labelledby="stationIdModal" aria-hidden="true">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+            </div>
+
+            <div class="modal-body">
+                <p>Set a Station ID to get the latest BirdWeather PUC detections.</p>
+
+                <form>
+                    <div class="form-group">
+                        <label for="inputStationId">
+                            <strong>Station ID</strong>
+                        </label>
+
+                        <input type="textbox" class="form-control" id="inputStationId" placeholder="Station Id #">
+                    </div>
+
+                    <div class="d-flex justify-content-center">
+                        <button type="button" class="btn btn-primary text-center" onclick="setStationIdAndGetDetections()">
+                            Get Detections
+                        </button>
+                    </div>
+                </form>
+
+                <p class="mt-2">You can use also put your station id (i.e. 99999999) at the end of the URL such as <em>https://deefinder200.github.io/birdweather-detections/#id=99999999</em> to automatically get detections.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Unsupported: QraphQL query for retrieving station detections
+/*
+const station_id_query = `
+    query stations($query: String!) {
+        stations(query: $query) {
+            nodes {
+                id
+                name
+            }
+        }
+    }
+`;
+*/
+
+// QraphQL query for retrieving station detections
+const detections_query = `
+    query station($id: ID!) {
+        station(id: $id) {
+            id
+            name
+            detections {
+                nodes {
+                    timestamp
+                    species {
+                        ebirdUrl
+                        commonName
+                        thumbnailUrl
+                    }
+                    coords {
+                        lat
+                        lon
+                    }
+                    certainty
+                    confidence
+                    probability
+                    soundscape {
+                        downloadFilename
+                        url
+                    }
+                }
+            }
+        }
+    }
+`;
+
+let detections_variables = {};
+let station_id_variables = {};
+
+// Display detections on map
+async function displayDetections() {
+    showLoadingModal();
+
+    let has_station_information = await getStationInformation();
+    if (!has_station_information) {
+        alert("Unable to find station information");
+        return;
+    }
+
+    let data = await fetchData(detections_query, detections_variables);
+    console.log(data);
+    if (!data) {
+        alert("Unable to find detections for this station. Please try again.");
+        hideLoadingModal();
+        $("#stationIdModal").modal("show");
+        return;
+    }
+
+    let detections = data.station.detections.nodes;
+
+    console.log(
+        JSON.stringify({ detections_query, detections_variables })
+    );
+
+    let marker_coords = [];
+
+    // Create the marker cluster group (this helps duplicate GPS points spiderify: https://gis.stackexchange.com/questions/359347/leaflet-markers-at-same-position-dynamically-display-all-markers-infos-through)
+    var markers = L.markerClusterGroup();
+
+    detections.forEach((detection) => {
+        if (detection.certainty != "almost_certain") {
+            return;
+        }
+
+        let coords = detection.coords;
+        let species = detection.species;
+
+        let bird_icon = L.icon({
+            iconUrl: species.thumbnailUrl,
+            iconSize: [28, 28], // size of the icon
+            iconAnchor: [16, 28], // point of the icon which will correspond to marker's location
+            popupAnchor: [0, -28], // point from which the popup should open relative to the iconAnchor
+            className: 'rounded-icon' // Adds rounding to the icon
+        });
+
+        let soundscape_filename = detection.soundscape.url.split('/').pop();
+
+        // Determine maximum accuracy we got for the position based on the number of decimal places for each part of the GPS coordinate
+        // Taken from here: https://support.garmin.com/en-US/?faq=hRMBoCTy5a7HqVkxukhHd8
+        let lon_accuracy = getMaxDecimalPlaces(coords.lon);
+        let lat_accuracy = getMaxDecimalPlaces(coords.lat);
+        let max_accuracy = (lon_accuracy > lat_accuracy) ? lon_accuracy : lat_accuracy;
+        var gps_accuracy = 11; // In meters
+
+        if (max_accuracy == 1) {
+            gps_accuracy = 11000;
+
+        } else if (max_accuracy == 2) {
+            gps_accuracy = 1100;
+
+        } else if (max_accuracy == 3) {
+            gps_accuracy = 111;
+
+        } else if (max_accuracy == 4) {
+            gps_accuracy = 11;
+
+        } else {
+            gps_accuracy = 1; // If we have even more decimal places, let's err on the side of being less accurate
+        }
+
+        let popup =  L.popup({
+            className: 'custom-popup'
+        }).setContent(`
+        <div style="display:flex;">
+            <div style="padding-right: 1em;">
+                <a href="${species.ebirdUrl}" target="_blank">
+                    <img src="${species.thumbnailUrl}" style="max-width: 48px;" class="rounded-icon" />
+                </a>
+            </div>
+
+            <div>
+                <strong>${species.commonName}</strong><br>
+                ${new Date(detection.timestamp).toLocaleString()}<br>
+                <a href="${detection.soundscape.url}" target="_blank" style="font-size: smaller;">${soundscape_filename}</a>
+                <p>
+                    ${coords.lat}, ${coords.lon}<br>
+                    Accuracy: ${gps_accuracy}m
+                </p>
+            </div>
+        </div>
+        `);
+
+        let marker = L.marker([coords.lat, coords.lon], { icon: bird_icon })
+            .addTo(map) // Helps us see what species was near a cluster
+            .bindPopup(popup);
+
+        // Add the marker coordinates to the array
+        marker_coords.push([coords.lat, coords.lon]);
+        markers.addLayer(marker);
+    });
+
+    map.addLayer(markers);
+
+    // Fit the map to the bounds of the markers
+    if (marker_coords.length > 0) {
+        let bounds = L.latLngBounds(marker_coords);
+        map.fitBounds(bounds);
+    }
+
+    hideLoadingModal();
+}
+
+// Fetch data from the BirdWeather GraphQL API
+async function fetchData(query, variables) {
+    let response = await fetch('https://app.birdweather.com/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, variables })
+    });
+
+    try {
+        let json = await response.json();
+        return json.data;
+
+    } catch {
+        return null;
+    }
+}
+
+// Retrieve maximum decimal places for a number (this helps for GPS accuracy)
+function getMaxDecimalPlaces(num) {
+  // Convert the number to a string and split it by the decimal point
+  const parts = num.toString().split('.');
+
+  // If there is no decimal point, return 0
+  if (parts.length === 1) {
+    return 0;
+  }
+
+  // Get the length of the second part (the digits after the decimal point)
+  return parts[1].length;
+}
+
+// Get station information from URL hash
+async function getStationInformation() {
+    let hash_params = parseHash();
+    if (hash_params["id"]) {
+        detections_variables["id"] = hash_params["id"];
+        $("#inputStationId").val(hash_params["id"]);
+        return true;
+    }
+
+    return false;
+
+    // BirdWeather PUC API doesn't seem to support finding stations by name yet
+    /*
+    if (hash_params["name"]) {
+        var station_id_variables = { "name": hash_params["name"] };
+        var station_id_variables = { "query": "name=" + hash_params["name"] };
+        let data = await fetchData(station_id_query, station_id_variables);
+        console.log(data);
+        return (data && data !== undefined);
+    }
+    */
+}
+
+function hideLoadingModal() {
+    $("#loadingModal").modal('hide');
+}
+
+// Parse the location.hash into an object
+function parseHash() {
+    const params = {};
+    const hashParts = window.location.hash.slice(1).split('&');
+    hashParts.forEach(part => {
+        const [key, value] = part.split('=');
+        params[key] = value;
+    });
+
+    return params;
+}
+
+async function setStationIdAndGetDetections() {
+    $("#stationIdModal").modal('hide');
+    window.location.hash = "#id=" + $("#inputStationId").val();
+    await displayDetections();
+}
+
+function showLoadingModal() {
+    $("#loadingModal").modal('show');
+}
+
+// Initialize the map
+var map = L.map('map', {
+    maxZoom: 20 // Set the maximum zoom level to 20
+    }).setView([45, -100], 4);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+// Call the displayDetections function to load the data
+getStationInformation()
+    .then((has_station_information) => {
+        if (has_station_information) {
+            displayDetections();
+        } else {
+            $("#stationIdModal").modal("show");
+        }
+    });
+</script>
+
+</body>
+</html>
